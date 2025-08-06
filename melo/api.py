@@ -17,13 +17,15 @@ from .split_utils import split_sentence
 from .mel_processing import spectrogram_torch, spectrogram_torch_conv
 from .download_utils import load_or_download_config, load_or_download_model
 
+import openvino as ov
+
 class TTS(nn.Module):
     def __init__(self, 
                 language,
                 device='auto',
                 use_hf=True,
                 config_path=None,
-                ckpt_path=None):
+                compiled_model=None):
         super().__init__()
         if device == 'auto':
             device = 'cpu'
@@ -56,8 +58,9 @@ class TTS(nn.Module):
         self.device = device
     
         # load state_dict
-        checkpoint_dict = load_or_download_model(language, device, use_hf=use_hf, ckpt_path=ckpt_path)
-        self.model.load_state_dict(checkpoint_dict['model'], strict=True)
+        self.compiled_model = compiled_model
+        # checkpoint_dict = load_or_download_model(language, device, use_hf=use_hf, ckpt_path=ckpt_path)
+        # self.model.load_state_dict(checkpoint_dict['model'], strict=True)
         
         language = language.split('_')[0]
         self.language = 'ZH_MIX_EN' if language == 'ZH' else language # we support a ZH_MIX_EN model
@@ -107,7 +110,20 @@ class TTS(nn.Module):
                 x_tst_lengths = torch.LongTensor([phones.size(0)]).to(device)
                 del phones
                 speakers = torch.LongTensor([speaker_id]).to(device)
-                audio = self.model.infer(
+                # audio = self.model.infer(
+                #         x_tst,
+                #         x_tst_lengths,
+                #         speakers,
+                #         tones,
+                #         lang_ids,
+                #         bert,
+                #         ja_bert,
+                #         sdp_ratio=sdp_ratio,
+                #         noise_scale=noise_scale,
+                #         noise_scale_w=noise_scale_w,
+                #         length_scale=1. / speed,
+                #     )[0][0, 0].data.cpu().float().numpy()
+                audio = self.infer_impl(
                         x_tst,
                         x_tst_lengths,
                         speakers,
@@ -121,7 +137,6 @@ class TTS(nn.Module):
                         length_scale=1. / speed,
                     )[0][0, 0].data.cpu().float().numpy()
                 del x_tst, tones, lang_ids, bert, ja_bert, x_tst_lengths, speakers
-                # 
             audio_list.append(audio)
         torch.cuda.empty_cache()
         audio = self.audio_numpy_concat(audio_list, sr=self.hps.data.sampling_rate, speed=speed)
@@ -133,3 +148,38 @@ class TTS(nn.Module):
                 soundfile.write(output_path, audio, self.hps.data.sampling_rate, format=format)
             else:
                 soundfile.write(output_path, audio, self.hps.data.sampling_rate)
+
+
+    def infer_impl(
+        self,
+        x,
+        x_lengths,
+        sid,
+        tone,
+        language,
+        bert,
+        ja_bert,
+        noise_scale,
+        length_scale,
+        noise_scale_w,
+        max_len=None,
+        sdp_ratio=1.0,
+        y=None,
+        g=None,
+    ):
+        ov_output = self.compiled_model(
+            (
+                x,
+                x_lengths,
+                sid,
+                tone,
+                language,
+                bert,
+                ja_bert,
+                noise_scale,
+                length_scale,
+                noise_scale_w,
+                sdp_ratio,
+            )
+        )
+        return (torch.tensor(ov_output[0]),)
